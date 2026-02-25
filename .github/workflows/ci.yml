@@ -1,0 +1,19 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+      - uses: nim-lang/setup-nimble-action@v1
+        with:
+          nimble-version: '0.22.1'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - run: |
+          nimble test
