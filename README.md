@@ -60,6 +60,27 @@ engine.loadData(qml.toOpenArrayByte(0, qml.high))
 discard QApplication.exec()
 ```
 
+### Properties
+
+`{.qproperty.}` exposes a field as a property with a getter, a setter slot (`setName`) and a
+notify signal (`nameChanged`). Either can be turned off:
+
+```nim
+qobject:
+  type Status = ref object of VirtualQObject
+    name {.qproperty.}: string # QML reads and writes
+    health {.qproperty(write = false).}: string # QML reads, Nim writes
+    version {.qproperty(write = false, notify = false).}: string # constant
+
+let s = Status()
+QObject.create(s)
+s.setHealth("ok") # emits healthChanged, only when the value changes
+```
+
+With `write = false` the property is read-only to the meta-object: QML cannot assign it and
+`QMetaProperty.write` fails. If it still notifies, `setHealth` is generated as a plain Nim proc,
+not a slot, unless the `qobject:` block declares its own proc of that name.
+
 See [`nim-seaqt`](https://github.com/seaqt/nim-seaqt) for more information.
 
 ## Related projects

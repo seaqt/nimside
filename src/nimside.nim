@@ -302,7 +302,7 @@ proc readProc(n: NimNode, types: var openArray[NimTypeDef]) =
 proc canConstruct(m: NimMethodDef): bool =
   true # not anyIt(m.params, toMetaTypeName(it.typ) == QMetaTypeTypeEnum.QObjectStar)
 
-proc processType(p: var NimTypeDef): (NimNode, NimNode) =
+proc processType(p: var NimTypeDef, userProcs: openArray[NimNode]): (NimNode, NimNode) =
   let
     n = p.n
     props = p.props
@@ -376,6 +376,18 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
         pre.add quote do:
           proc `writeSlotLit`*(o: `typName`, v: `propType`) =
             o.`propName` = v
+
+    elif prop.def.writeSlot.len == 0 and signalNameLit != nil:
+      # Read-only to the meta-object (QML, QMetaProperty) but notifying: Nim
+      # still needs a setter that emits the notify signal. It is a plain proc,
+      # not a slot, unless the block declares its own proc of that name.
+      let setter = ident("set" & titleCase(propName.strVal))
+      if not userProcs.anyIt(it.eqIdent(setter)):
+        pre.add quote do:
+          proc `setter`*(o: `typName`, v: `propType`) =
+            if o.`propName` != v:
+              o.`propName` = v
+              o.`signalNameLit`()
 
     if prop.def.readSlot.len > 0 and findSlot(prop.def.readSlot) < 0:
       p.slots.add NimMethodDef(
@@ -692,10 +704,12 @@ macro qobject*(body: untyped): untyped =
       discard # result.add n
 
   # Next come user-supplied signals and slots
+  var userProcs: seq[NimNode]
   for i in 0 ..< body.len:
     let n = body[i]
     case n.kind
     of nnkProcDef:
+      userProcs.add n.name
       readProc(n, typeDefs)
     else:
       discard
@@ -704,7 +718,7 @@ macro qobject*(body: untyped): untyped =
 
   # Finally, process all types and write out their helpers / metadata
   for typDef in typeDefs.mitems():
-    let (a, b) = processType(typDef)
+    let (a, b) = processType(typDef, userProcs)
     result.add a
     post.add b
 
