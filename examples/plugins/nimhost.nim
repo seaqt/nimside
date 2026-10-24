@@ -15,6 +15,6 @@ echo "Loaded ", plugin.fileName()
 let instance = plugin.instance()
 
 # Using reflection, we can call exported functions as usual, connect signals/slots etc
-doAssert QMetaObject.invokeMethod(instance, "hello")
+doAssert QMetaObject.invokeMethod(instance, "hello", QGenericArgument.create())
 
 doAssert plugin.unload()

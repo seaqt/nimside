@@ -742,7 +742,7 @@ when isMainModule:
   let o = Object()
   QObject.create(o)
 
-  doAssert QMetaObject.invokeMethod(o[], "slotNoParam")
+  doAssert QMetaObject.invokeMethod(o[], "slotNoParam", QGenericArgument.create())
   doAssert o.slotNoParamCalls == 1
 
   doAssert o.otherProp() == nil
