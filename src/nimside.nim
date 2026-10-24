@@ -28,6 +28,11 @@ template declareMemCpy(T: type, v: untyped, p: pointer) =
   assignMemCpy(v, p)
 
 template qproperty*(write = true, notify = true) {.pragma.}
+template qclassinfo*(name, value: string) {.pragma.}
+  ## `Q_CLASSINFO` - attach a name/value pair to the metaobject of a `qobject`
+  ## type, ie `type T {.qclassinfo("DefaultProperty", "items").} = ...` - may be
+  ## repeated
+
 template slot*() {.pragma.}
 template signal*() {.pragma.}
 
@@ -87,6 +92,7 @@ type
   NimTypeDef = object
     n: NimNode
     objTyp: NimNode
+    classInfos: seq[(NimNode, NimNode)]
     props: seq[NimPropDef]
     signals: seq[NimMethodDef]
     slots: seq[NimMethodDef]
@@ -247,7 +253,16 @@ proc readType(n: NimNode): NimTypeDef =
             )
           )
 
-  NimTypeDef(n: n, objTyp: objTyp, props: props)
+  var classInfos: seq[(NimNode, NimNode)]
+  if n[0].kind == nnkPragmaExpr:
+    for pragma in n[0][1]:
+      if pragma.kind in {nnkCall, nnkCommand, nnkExprColonExpr} and
+          "qclassinfo".eqIdent(pragma[0]):
+        if pragma.len != 3:
+          error("qclassinfo takes a name and a value", pragma)
+        classInfos.add (pragma[1], pragma[2])
+
+  NimTypeDef(n: n, objTyp: objTyp, props: props, classInfos: classInfos)
 
 type NimProcDef = object
   n: NimNode
@@ -501,14 +516,23 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
     signalsLit = nnkBracket.newTree(p.signals.mapIt(it.toMethodDef(isSignal = true)))
     slotsLit = nnkBracket.newTree(p.slots.mapIt(it.toMethodDef(isSignal = false)))
     propsLit = nnkBracket.newTree(p.props.mapIt(it.toPropDef()))
+    classInfosLit = nnkBracket.newTree(
+      p.classInfos.mapIt(
+        block:
+          let (name, value) = it
+          quote:
+            ClassInfoDef(name: `name`, value: `value`)
+      )
+    )
     typNameLit = newLit(className)
     metaObjectInst = ident(className & "MetaObjectInstance")
 
     metaObjectNode = quote:
       var `metaObjectInst` {.global.}: pointer
       proc `staticMetaObject`*(_: type `typName`): gen_qobjectdefs_types.QMetaObject =
-        const (data, stringdata, metaTypes) =
-          genMetaObjectData(`typNameLit`, `signalsLit`, `slotsLit`, `propsLit`)
+        const (data, stringdata, metaTypes) = genMetaObjectData(
+          `typNameLit`, `signalsLit`, `slotsLit`, `propsLit`, `classInfosLit`
+        )
         if `metaObjectInst` == nil:
           var tmp = createMetaObject(
             gen_qobject.staticMetaObject(gen_qobject_types.QObject),

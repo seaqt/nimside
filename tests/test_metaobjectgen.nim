@@ -1,4 +1,4 @@
-import nimside/metaobjectgen, seaqt/[qobject], unittest2
+import nimside/metaobjectgen, seaqt/[qobject, qmetaclassinfo, qmetaproperty], unittest2
 
 suite "genMetaObject Tests":
   test "Simple signal":
@@ -446,3 +446,67 @@ suite "genMetaObject Tests":
     check(offset >= 0)
     check(totalCount > 0)
     check(totalCount >= offset + 1)
+
+  test "Class info":
+    let
+      sigs = @[MethodDef.signalDef("valueChanged", @[])]
+      slots = @[MethodDef.slotDef("poke", "void", @[])]
+      props = @[
+        PropertyDef(
+          name: "value",
+          metaType: "int",
+          readSlot: "value",
+          writeSlot: "setValue",
+          notifySignal: "valueChanged",
+        )
+      ]
+      infos = @[
+        ClassInfoDef(name: "RemoteObject Type", value: "Greeter"),
+        ClassInfoDef(name: "RemoteObject Signature", value: "c0ffee"),
+        ClassInfoDef(name: "Alias", value: "poke"), # shares a string with a slot
+      ]
+      mo = genMetaObject(
+        QObject.staticMetaObject, "TestClassInfo", sigs, slots, props, infos
+      )
+      offset = mo.classInfoOffset()
+
+    check:
+      mo.className() == "TestClassInfo"
+      mo.classInfoCount() - offset == 3
+      $mo.classInfo(offset + 0).name() == "RemoteObject Type"
+      $mo.classInfo(offset + 0).value() == "Greeter"
+      $mo.classInfo(offset + 1).name() == "RemoteObject Signature"
+      $mo.classInfo(offset + 1).value() == "c0ffee"
+      $mo.classInfo(offset + 2).name() == "Alias"
+      $mo.classInfo(offset + 2).value() == "poke"
+      mo.indexOfClassInfo("RemoteObject Signature") == offset + 1
+      mo.indexOfClassInfo("Missing") == -1
+
+      # the rest of the metaobject is unaffected
+      mo.methodCount() - mo.methodOffset() == 2
+      mo.indexOfSignal("valueChanged()") >= 0
+      mo.indexOfSlot("poke()") >= 0
+      mo.propertyCount() - mo.propertyOffset() == 1
+      mo.property(mo.indexOfProperty("value")).notifySignalIndex() ==
+        mo.indexOfSignal("valueChanged()")
+
+  test "No class info":
+    let mo = genMetaObject(QObject.staticMetaObject, "TestNoClassInfo", [], [], [])
+    check:
+      mo.classInfoCount() == mo.classInfoOffset()
+      mo.indexOfClassInfo("RemoteObject Type") == -1
+
+  test "Class info data layout":
+    let (data, _, _) = genMetaObjectData(
+      "TestClassInfoLayout",
+      [MethodDef.signalDef("sig", @[])],
+      [],
+      [],
+      [ClassInfoDef(name: "a", value: "b"), ClassInfoDef(name: "c", value: "d")],
+    )
+    # As moc: the pairs come right after the header, before the methods
+    check:
+      data[2] == 2'u32 # classInfoCount
+      data[3] == 14'u32 # classInfoData
+      data[4] == 1'u32 # methodCount
+      data[5] == 14'u32 + 2 * 2 # methodData

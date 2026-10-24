@@ -60,6 +60,24 @@ engine.loadData(qml.toOpenArrayByte(0, qml.high))
 discard QApplication.exec()
 ```
 
+### Class info
+
+The `qclassinfo` type pragma is `Q_CLASSINFO`: each one adds a name/value pair to
+the metaobject, read back with `QMetaObject::classInfo`. It may be repeated, and
+takes any constant string - here, the type name and signature that
+`QtRemoteObjects` checks between a source and its replicas:
+
+```nim
+const greeterSignature = "..." # what repc derives from the .rep file
+
+qobject:
+  type Greeter {.
+    qclassinfo("RemoteObject Type", "Greeter"),
+    qclassinfo("RemoteObject Signature", greeterSignature)
+  .} = ref object of VirtualQObject
+    greeting {.qproperty.}: string
+```
+
 See [`nim-seaqt`](https://github.com/seaqt/nim-seaqt) for more information.
 
 ## Related projects

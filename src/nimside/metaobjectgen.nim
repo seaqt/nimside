@@ -119,6 +119,9 @@ type
     metaType*: string
     readSlot*, writeSlot*, notifySignal*: string
 
+  ClassInfoDef* = object
+    name*, value*: string
+
   QObjectDef* = object
     name*: string
     signals*: seq[MethodDef]
@@ -287,6 +290,7 @@ proc genMetaObjectData*(
     signals: openArray[MethodDef],
     slots: openArray[MethodDef],
     props: openArray[PropertyDef],
+    classInfos: openArray[ClassInfoDef] = [],
 ): (seq[cuint], seq[byte], seq[string]) =
   # Class names need to be globally unique
   # TODO use something other than a thread var
@@ -311,13 +315,14 @@ proc genMetaObjectData*(
   let
     className = className & (if c > 0: $c else: "")
     methods = @signals & @slots
+    classInfoCount = cuint(classInfos.len())
     methodCount = cuint(methods.len())
     propertyCount = cuint(props.len())
     methodParamsSize = cuint(foldl(methods, a + b.params.len, 0)) * 2 + methodCount
 
     metaSize =
-      QMetaObjectPrivateElems + methodCount * methodSize + methodParamsSize +
-      cuint(props.len) * propSize + 1
+      QMetaObjectPrivateElems + classInfoCount * 2 + methodCount * methodSize +
+      methodParamsSize + cuint(props.len) * propSize + 1
 
   var metaTypes: seq[string]
   template addMetaType(s: string): uint32 =
@@ -366,11 +371,12 @@ proc genMetaObjectData*(
     else:
       cuint id
 
-  block: # classinfo
-    discard
-
   block: # private data
     data[classNamePos] = addString(className)
+    data[classInfoCountPos] = classInfoCount
+    data[classInfoDataPos] = if classInfoCount == 0: 0 else: dataIndex
+    dataIndex += 2 * classInfoCount
+
     data[methodCountPos] = methodCount
     data[methodDataPos] = if methodCount == 0: 0 else: dataIndex
     dataIndex += methodSize * methodCount
@@ -386,6 +392,11 @@ proc genMetaObjectData*(
     data[signalCountPos] = cuint signals.len
 
   dataIndex = QMetaObjectPrivateElems
+
+  block: # classinfo - (name, value) string index pairs, same layout in 7 and 9
+    for ci in classInfos:
+      addData(addString(ci.name))
+      addData(addString(ci.value))
 
   when QMetaObjectRevision >= 9:
     for p in props:
@@ -576,7 +587,8 @@ proc genMetaObject*(
     className: string,
     signals, slots: openArray[MethodDef],
     props: openArray[PropertyDef],
+    classInfos: openArray[ClassInfoDef] = [],
 ): gen_qobjectdefs_types.QMetaObject =
   let (data, stringdata, metaTypes) =
-    genMetaObjectData(className, signals, slots, props)
+    genMetaObjectData(className, signals, slots, props, classInfos)
   createMetaObject(superclassMetaObject, data, stringdata, metaTypes)
