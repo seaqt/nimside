@@ -60,6 +60,31 @@ engine.loadData(qml.toOpenArrayByte(0, qml.high))
 discard QApplication.exec()
 ```
 
+### Types outside the built-in set
+
+Slot and signal parameters, return types and properties map to Qt's built-in types (`bool`,
+integers, `float`, `string` as `QString`, `seq[string]` as `QStringList`, `QObject`). Any other
+type can name its Qt type with a `qtTypeName` declared before the `qobject:` block, which is how
+an opaque C++ pointer reaches Nim:
+
+```nim
+type ApiPtr = distinct pointer # a `LogosAPI*` handed over by a C++ host
+
+func qtTypeName(_: type ApiPtr): string =
+  "LogosAPI*"
+
+qobject:
+  type Plugin = ref object of VirtualQObject
+    api: ApiPtr
+
+  proc initLogos(o: Plugin, api: ApiPtr) {.slot.} =
+    o.api = api
+```
+
+The C++ side calls it as usual, `QMetaObject::invokeMethod(plugin, "initLogos", Q_ARG(LogosAPI*, api))`.
+Such values are copied bitwise to and from Qt's argument storage, so the Nim type must have the
+C++ type's layout: a pointer, or plain data of the same size.
+
 See [`nim-seaqt`](https://github.com/seaqt/nim-seaqt) for more information.
 
 ## Related projects

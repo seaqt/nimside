@@ -31,6 +31,25 @@ template qproperty*(write = true, notify = true) {.pragma.}
 template slot*() {.pragma.}
 template signal*() {.pragma.}
 
+template metaTypeName*(T: typedesc): string =
+  ## The Qt type name `T` has in the meta-object. A type outside the built-in
+  ## set names its own by declaring `qtTypeName`, which must be usable at
+  ## compile time and visible where the `qobject:` block is:
+  ##
+  ## ```nim
+  ## type ApiPtr = distinct pointer
+  ## func qtTypeName(_: type ApiPtr): string = "LogosAPI*"
+  ## ```
+  ##
+  ## Values of such a type are copied bitwise to and from Qt's argument
+  ## storage, so its Nim layout must be the C++ type's: a pointer, or plain
+  ## data of the same size.
+  mixin qtTypeName
+  when compiles(qtTypeName(T)):
+    qtTypeName(T)
+  else:
+    $QBuiltinMetaType.resolve(T)
+
 template titleCase(s: string): string =
   s[0].toUpperAscii() & s[1 ..^ 1]
 
@@ -99,7 +118,7 @@ proc toParamDef(v: NimParamDef): NimNode =
     name = newLit($v.name)
     typ = v.typ
   quote:
-    ParamDef(name: `name`, metaType: $QBuiltinMetaType.resolve(`typ`))
+    ParamDef(name: `name`, metaType: metaTypeName(`typ`))
 
 proc toMethodDef(v: NimMethodDef, isSignal: bool): NimNode =
   let
@@ -116,7 +135,7 @@ proc toMethodDef(v: NimMethodDef, isSignal: bool): NimNode =
         v.returnType
 
     quote:
-      MethodDef.slotDef(`name`, $QBuiltinMetaType.resolve(`returnType`), `params`)
+      MethodDef.slotDef(`name`, metaTypeName(`returnType`), `params`)
 
 proc toPropDef(v: NimPropDef): NimNode =
   let
@@ -128,14 +147,17 @@ proc toPropDef(v: NimPropDef): NimNode =
   quote:
     PropertyDef(
       name: `name`,
-      metaType: $QBuiltinMetaType.resolve(`typ`),
+      metaType: metaTypeName(`typ`),
       readSlot: `readSlot`,
       writeSlot: `writeSlot`,
       notifySignal: `notifySignal`,
     )
 
 proc store[T](ret: T, where: var pointer) =
-  when ret is ref:
+  mixin qtTypeName
+  when compiles(qtTypeName(T)):
+    cast[ptr T](where)[] = ret
+  elif ret is ref:
     if ret == nil:
       where = nil
     else:
@@ -402,14 +424,21 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
         id = ident("arg" & $i)
         name = param.name
       variants.add quote do:
-        let `id` =
-          when `name` is ref gen_qobject_types.QObject:
+        var `id` =
+          when compiles(qtTypeName(typeof(`name`))):
+            `name` # passed by address, as Qt passes it
+          elif `name` is ref gen_qobject_types.QObject:
             gen_qvariant_types.QVariant.fromValue(`name`[])
           else:
             gen_qvariant_types.QVariant.create(`name`)
-        `args`[`idx` + 1] = `id`.constData()
+        `args`[`idx` + 1] =
+          when `id` is gen_qvariant_types.QVariant:
+            `id`.constData()
+          else:
+            addr `id`
       delvariants.add quote do:
-        `id`.delete()
+        when `id` is gen_qvariant_types.QVariant:
+          `id`.delete()
 
     let self = signal.n.params[1][0]
 
@@ -454,14 +483,21 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
         id = ident("arg" & $i)
         name = param.name
       variants.add quote do:
-        let `id` =
-          when `name` is ref gen_qobject_types.QObject:
+        var `id` =
+          when compiles(qtTypeName(typeof(`name`))):
+            `name` # passed by address, as Qt passes it
+          elif `name` is ref gen_qobject_types.QObject:
             gen_qvariant_types.QVariant.fromValue(`name`[])
           else:
             gen_qvariant_types.QVariant.create(`name`)
-        `args`[`idx` + 1] = `id`.constData()
+        `args`[`idx` + 1] =
+          when `id` is gen_qvariant_types.QVariant:
+            `id`.constData()
+          else:
+            addr `id`
       delvariants.add quote do:
-        `id`.delete()
+        when `id` is gen_qvariant_types.QVariant:
+          `id`.delete()
 
     let
       self = ident("self")
