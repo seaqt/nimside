@@ -30,6 +30,7 @@ template declareMemCpy(T: type, v: untyped, p: pointer) =
 template qproperty*(write = true, notify = true) {.pragma.}
 template slot*() {.pragma.}
 template signal*() {.pragma.}
+template slotHook*() {.pragma.}
 
 template titleCase(s: string): string =
   s[0].toUpperAscii() & s[1 ..^ 1]
@@ -90,6 +91,7 @@ type
     props: seq[NimPropDef]
     signals: seq[NimMethodDef]
     slots: seq[NimMethodDef]
+    slotHook: NimNode
 
 proc isVoid(v: NimNode): bool =
   v.kind == nnkEmpty or "void".eqIdent(v)
@@ -249,6 +251,26 @@ proc readType(n: NimNode): NimTypeDef =
 
   NimTypeDef(n: n, objTyp: objTyp, props: props)
 
+proc findTypeIndex(n, typ: NimNode, types: openArray[NimTypeDef]): int =
+  for i in 0 ..< types.len:
+    if types[i].n[0].basename().eqIdent(typ):
+      return i
+  error("First parameter must be a QObject-derived type in the same qobject block", n)
+
+proc readSlotHook(n: NimNode, types: var openArray[NimTypeDef], isSlotOrSignal: bool) =
+  ## `proc hook(o: T, slot: string) {.slotHook.}` - called with the slot name before
+  ## every slot invocation that goes through the meta-object system
+  if isSlotOrSignal:
+    error("A slot hook can't be a signal or slot itself", n)
+  let params = n.params
+  if params.len != 3 or params[1].len != 3 or params[2].len != 3 or
+      not params[0].isVoid():
+    error("A slot hook must be `proc(o: T, slot: string)`", n)
+  let typIndex = findTypeIndex(n, params[1][1], types)
+  if types[typIndex].slotHook != nil:
+    error("Only one slot hook per type is supported", n)
+  types[typIndex].slotHook = n.name
+
 type NimProcDef = object
   n: NimNode
   meth: MethodDef
@@ -260,6 +282,10 @@ proc readProc(n: NimNode, types: var openArray[NimTypeDef]) =
 
     isSlot = pragma.hasPragma("slot")
     isSignal = pragma.hasPragma("signal")
+
+  if pragma.hasPragma("slotHook"):
+    readSlotHook(n, types, isSlot or isSignal)
+    return
 
   if isSlot == isSignal:
     if isSlot:
@@ -274,19 +300,7 @@ proc readProc(n: NimNode, types: var openArray[NimTypeDef]) =
   if params.len < 2:
     error("First parameter must be a QObject-derived type", n)
 
-  let typIndex = block:
-    var typIndex = -1
-    for i in 0 ..< types.len:
-      let typName = types[i].n[0].basename()
-
-      if typName.eqIdent(params[1][1]):
-        typIndex = i
-        break
-    if typIndex == -1:
-      error(
-        "First parameter must be a QObject-derived type in the same qobject block", n
-      )
-    typIndex
+  let typIndex = findTypeIndex(n, params[1][1], types)
 
   var paramDefs: seq[NimParamDef]
   for param in params[2 ..< params.len]:
@@ -548,9 +562,12 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
 
   for i, s in p.slots:
     if canConstruct(s):
-      invokeCase.add nnkOfBranch.newTree(
-        newLit(i + p.signals.len), genMethodCall(s, s.name, self, argv, newLit(1))
-      )
+      let call = genMethodCall(s, s.name, self, argv, newLit(1))
+      if p.slotHook != nil:
+        let hookCall = newCall(p.slotHook, self, newLit($s.name))
+        hookCall.copyLineInfo(p.slotHook) # errors point at the hook, not here
+        call.insert(0, hookCall)
+      invokeCase.add nnkOfBranch.newTree(newLit(i + p.signals.len), call)
     else:
       warning "TODO Cannot receive QObject parameters, skipping metacall: " &
         s.name.strVal, s.name

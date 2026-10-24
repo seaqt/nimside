@@ -62,6 +62,24 @@ discard QApplication.exec()
 
 See [`nim-seaqt`](https://github.com/seaqt/nim-seaqt) for more information.
 
+### Slot hooks
+
+A proc marked `{.slotHook.}` in the `qobject:` block is called with the slot's name before every slot invocation that arrives through the meta-object system - QML, `QMetaObject.invokeMethod`, signal-slot connections:
+
+```nim
+qobject:
+  type MyObject = ref object of VirtualQObject
+    calls: seq[string]
+
+  proc record(m: MyObject, slot: string) {.slotHook, raises: [].} =
+    m.calls.add slot # or log, trace, count ...
+
+  proc run(m: MyObject) {.slot, raises: [].} =
+    discard
+```
+
+Calling `m.run()` directly from Nim is a plain proc call and does not run the hook. Property reads and writes from QML do not run it either, but invoking a property accessor as a method (`myobject.name()`) does. There is at most one hook per type, and like slots it must not raise.
+
 ## Related projects
 
 `nimside` was inspired by [`nimqml`](https://github.com/filcuc/nimqml) which offers a similar DSL based on [`DOtherSide`](https://github.com/filcuc/dotherside).
