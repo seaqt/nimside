@@ -53,10 +53,12 @@ proc extractTypeImpl(n: NimNode): NimNode =
     error("Invalid node to retrieve type implementation of: " & $n.kind)
 
 proc findPragma(n: NimNode, name: string): NimNode =
+  ## The pragma entry `name` or `name(...)`, wherever it is in the pragma list
   case n.kind
   of nnkPragma:
-    if name.eqIdent(n[0]) or n[0].kind == nnkCall and name.eqIdent(n[0][0]):
-      return n
+    for p in n:
+      if name.eqIdent(p) or p.kind == nnkCall and name.eqIdent(p[0]):
+        return p
   else:
     for nn in n:
       let x = findPragma(nn, name)
@@ -211,8 +213,8 @@ proc readType(n: NimNode): NimTypeDef =
             write = true
             notify = true
 
-          if qprop[0].kind == nnkCall:
-            for n in qprop[0][1 ..^ 1]:
+          if qprop.kind == nnkCall:
+            for n in qprop[1 ..^ 1]:
               case n.kind
               of nnkExprEqExpr:
                 if "write".eqIdent(n[0]):
@@ -297,6 +299,12 @@ proc readProc(n: NimNode, types: var openArray[NimTypeDef]) =
   if isSignal:
     types[typIndex].signals.add(def)
   else:
+    # A forward-declared slot and its implementation are the same slot
+    for s in types[typIndex].slots:
+      if s.name.eqIdent(name) and
+          s.params.mapIt(it.typ.repr) == paramDefs.mapIt(it.typ.repr) and
+          (s.n.body.kind == nnkEmpty or n.body.kind == nnkEmpty):
+        return
     types[typIndex].slots.add(def)
 
 proc canConstruct(m: NimMethodDef): bool =
@@ -309,6 +317,7 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
     typName = n[0].basename()
     className = typName.strVal
     pre = nnkStmtList.newTree()
+    accessors = nnkStmtList.newTree()
     post = nnkStmtList.newTree()
 
   template findSignal(n: string): int =
@@ -349,7 +358,6 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
               p.signals.add NimMethodDef(
                 n: n, name: name, returnType: voidTyp, params: @[]
               )
-              pre.add n
               p.signals.high()
 
           p.signals[signalIndex].name
@@ -366,14 +374,14 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
       let writeSlotLit = p.slots[^1].name
 
       if signalNameLit != nil:
-        pre.add quote do:
+        accessors.add quote do:
           proc `writeSlotLit`*(o: `typName`, v: `propType`) =
             if o.`propName` != v:
               o.`propName` = v
               o.`signalNameLit`()
 
       else:
-        pre.add quote do:
+        accessors.add quote do:
           proc `writeSlotLit`*(o: `typName`, v: `propType`) =
             o.`propName` = v
 
@@ -382,7 +390,7 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
         name: ident(prop.def.readSlot), returnType: propType, params: @[]
       )
       let slotName = p.slots[^1].name
-      pre.add quote do:
+      accessors.add quote do:
         proc `slotName`*(o: `typName`): lent `propType` =
           o.`propName`
 
@@ -430,7 +438,7 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
           gen_qobjectdefs_types.QMetaObject.activate(
             `self`[], `staticMetaObject`(`typName`), cint `signalIndexLit`, nil
           )
-    post.add signal.n
+    pre.add signal.n
 
   # Multi-threading version that takes a `ptr` instead of a `ref`
   # TODO a bit ugly as far as approaches go - the user is supposed to pass
@@ -490,7 +498,7 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
         newEmptyNode(),
       )
 
-    post.add newProc(
+    pre.add newProc(
       signalNameLit,
       @[newEmptyNode(), selfPtrParam] &
         signal.params.mapIt(nnkIdentDefs.newTree(it.name, it.typ, newEmptyNode())),
@@ -632,7 +640,7 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
       else:
         `id`
 
-  post.add quote do:
+  pre.add quote do:
     proc setup*(o: `typName`) =
       gen_qobject_types.QObject.create(o)
 
@@ -664,7 +672,7 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
     for p in signal.params:
       params.add(nnkIdentDefs.newTree(p.name, p.typ, newEmptyNode()))
 
-    post.add quote do:
+    pre.add quote do:
       proc `onSignal`*(sender: `typName`, `callback`: `callbackTy`) =
         proc inner(args: pointer) =
           let `argv` {.used.} = cast[ptr UncheckedArray[pointer]](args)
@@ -673,6 +681,8 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
         discard QObject.connectRaw(
           sender[], `signature`, sender[], inner, 0, `typName`.staticMetaObject()
         )
+
+  pre.add accessors
 
   (pre, post)
 
@@ -712,6 +722,10 @@ macro qobject*(body: untyped): untyped =
     case n.kind
     of nnkTypeSection:
       discard
+    of nnkProcDef:
+      # Signals were emitted with the type's helpers
+      if not n.pragma.hasPragma("signal"):
+        result.add n
     else:
       # Other stuff comes after auto-generated helpers
       result.add n
