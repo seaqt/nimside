@@ -30,6 +30,15 @@ template declareMemCpy(T: type, v: untyped, p: pointer) =
 template qproperty*(write = true, notify = true) {.pragma.}
 template slot*() {.pragma.}
 template signal*() {.pragma.}
+template slotError*() {.pragma.}
+
+proc reportSlotError*(className, slot: string, e: ref Exception) {.raises: [].} =
+  ## Default handler for an exception escaping a slot called through the
+  ## meta-object system - override with a `{.slotError.}` proc
+  try:
+    stderr.writeLine(className, ".", slot, ": unhandled ", e.name, ": ", e.msg)
+  except IOError:
+    discard
 
 template titleCase(s: string): string =
   s[0].toUpperAscii() & s[1 ..^ 1]
@@ -90,6 +99,7 @@ type
     props: seq[NimPropDef]
     signals: seq[NimMethodDef]
     slots: seq[NimMethodDef]
+    slotError: NimNode
 
 proc isVoid(v: NimNode): bool =
   v.kind == nnkEmpty or "void".eqIdent(v)
@@ -249,6 +259,28 @@ proc readType(n: NimNode): NimTypeDef =
 
   NimTypeDef(n: n, objTyp: objTyp, props: props)
 
+proc findTypeIndex(n, typ: NimNode, types: openArray[NimTypeDef]): int =
+  for i in 0 ..< types.len:
+    if types[i].n[0].basename().eqIdent(typ):
+      return i
+  error("First parameter must be a QObject-derived type in the same qobject block", n)
+
+proc readSlotError(n: NimNode, types: var openArray[NimTypeDef], isSlotOrSignal: bool) =
+  ## `proc handler(o: T, slot: string, e: ref Exception) {.slotError.}` - called
+  ## with any exception that escapes a slot called through the meta-object system
+  if isSlotOrSignal:
+    error("A slot error handler can't be a signal or slot itself", n)
+  let params = n.params
+  if params.len != 4 or params[1].len != 3 or params[2].len != 3 or params[3].len != 3 or
+      not params[0].isVoid():
+    error(
+      "A slot error handler must be `proc(o: T, slot: string, e: ref Exception)`", n
+    )
+  let typIndex = findTypeIndex(n, params[1][1], types)
+  if types[typIndex].slotError != nil:
+    error("Only one slot error handler per type is supported", n)
+  types[typIndex].slotError = n.name
+
 type NimProcDef = object
   n: NimNode
   meth: MethodDef
@@ -260,6 +292,10 @@ proc readProc(n: NimNode, types: var openArray[NimTypeDef]) =
 
     isSlot = pragma.hasPragma("slot")
     isSignal = pragma.hasPragma("signal")
+
+  if pragma.hasPragma("slotError"):
+    readSlotError(n, types, isSlot or isSignal)
+    return
 
   if isSlot == isSignal:
     if isSlot:
@@ -274,19 +310,7 @@ proc readProc(n: NimNode, types: var openArray[NimTypeDef]) =
   if params.len < 2:
     error("First parameter must be a QObject-derived type", n)
 
-  let typIndex = block:
-    var typIndex = -1
-    for i in 0 ..< types.len:
-      let typName = types[i].n[0].basename()
-
-      if typName.eqIdent(params[1][1]):
-        typIndex = i
-        break
-    if typIndex == -1:
-      error(
-        "First parameter must be a QObject-derived type in the same qobject block", n
-      )
-    typIndex
+  let typIndex = findTypeIndex(n, params[1][1], types)
 
   var paramDefs: seq[NimParamDef]
   for param in params[2 ..< params.len]:
@@ -546,10 +570,29 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
       ),
     )
 
+  let slotError = p.slotError
+  proc guarded(call: NimNode, slot: NimMethodDef): NimNode =
+    # Slots run on Qt's stack - an exception must not unwind into it
+    let
+      e = genSym(nskLet, "e")
+      slotNameLit = newLit($slot.name)
+      report =
+        if slotError != nil:
+          newCall(slotError, self, slotNameLit, e)
+        else:
+          newCall(bindSym"reportSlotError", newLit(className), slotNameLit, e)
+    if slotError != nil:
+      report.copyLineInfo(slotError) # errors point at the handler, not here
+    # built by hand rather than with `quote` so `report` keeps its line info
+    nnkTryStmt.newTree(
+      call, nnkExceptBranch.newTree(infix(bindSym"Exception", "as", e), report)
+    )
+
   for i, s in p.slots:
     if canConstruct(s):
       invokeCase.add nnkOfBranch.newTree(
-        newLit(i + p.signals.len), genMethodCall(s, s.name, self, argv, newLit(1))
+        newLit(i + p.signals.len),
+        guarded(genMethodCall(s, s.name, self, argv, newLit(1)), s),
       )
     else:
       warning "TODO Cannot receive QObject parameters, skipping metacall: " &
@@ -564,7 +607,8 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
       let slot = p.slots[findSlot(prop.def.readSlot)]
       if canConstruct(slot):
         readPropCase.add nnkOfBranch.newTree(
-          newLit(i), genMethodCall(slot, slot.name, self, argv, newLit(1))
+          newLit(i),
+          guarded(genMethodCall(slot, slot.name, self, argv, newLit(1)), slot),
         )
       else:
         warning "TODO Cannot receive QObject parameters, skipping metacall: " &
@@ -574,7 +618,8 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
       let slot = p.slots[findSlot(prop.def.writeSlot)]
       if canConstruct(slot):
         writePropCase.add nnkOfBranch.newTree(
-          newLit(i), genMethodCall(slot, slot.name, self, argv, newLit(0))
+          newLit(i),
+          guarded(genMethodCall(slot, slot.name, self, argv, newLit(0)), slot),
         )
       else:
         warning "TODO Cannot receive QObject parameters, skipping metacall: " &
@@ -592,7 +637,9 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
     propCountLit = newLit(props.len)
     metacall = ident("metacall")
   post.add quote do:
-    method `metacall`(`self`: `typName`, c: cint, id: cint, a: pointer): cint =
+    method `metacall`(
+        `self`: `typName`, c: cint, id: cint, a: pointer
+    ): cint {.raises: [].} =
       var `id` = gen_qobject.QObjectmetacall(`self`[], c, id, a)
       if `id` < 0:
         return `id`

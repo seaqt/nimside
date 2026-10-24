@@ -62,6 +62,24 @@ discard QApplication.exec()
 
 See [`nim-seaqt`](https://github.com/seaqt/nim-seaqt) for more information.
 
+### Exceptions in slots
+
+Slots called through the meta-object system (QML, `QMetaObject.invokeMethod`, signal-slot connections, property reads and writes) run on Qt's C++ stack, so an exception must never unwind out of them. The generated `qt_metacall` catches any exception a slot raises and passes it to the type's `{.slotError.}` proc, or, if there is none, writes it to stderr. The slot call then returns normally to Qt. Slots therefore don't need `{.raises: [].}`:
+
+```nim
+qobject:
+  type MyObject = ref object of VirtualQObject
+    name {.qproperty.}: string
+
+  proc onSlotError(m: MyObject, slot: string, e: ref Exception) {.slotError, raises: [].} =
+    echo "slot ", slot, " failed: ", e.msg
+
+  proc load(m: MyObject, path: string) {.slot.} =
+    m.name = readFile(path) # may raise IOError
+```
+
+Direct Nim calls (`m.load("x")`) are ordinary proc calls and raise as usual. The handler itself must not raise. Defects are caught too, unless you compile with `--panics:on`, in which case they end the program.
+
 ## Related projects
 
 `nimside` was inspired by [`nimqml`](https://github.com/filcuc/nimqml) which offers a similar DSL based on [`DOtherSide`](https://github.com/filcuc/dotherside).
