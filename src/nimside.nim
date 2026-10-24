@@ -27,7 +27,7 @@ template declareMemCpy(T: type, v: untyped, p: pointer) =
   var v: T
   assignMemCpy(v, p)
 
-template qproperty*(write = true, notify = true) {.pragma.}
+template qproperty*(write = true, notify = true, notifyValue = false) {.pragma.}
 template slot*() {.pragma.}
 template signal*() {.pragma.}
 
@@ -67,6 +67,18 @@ proc findPragma(n: NimNode, name: string): NimNode =
 proc hasPragma(n: NimNode, name: string): bool =
   findPragma(n, name) != nil
 
+proc boolArg(n: NimNode): bool =
+  # An untyped `true` is an ident, which `boolVal` reads as false
+  if n.kind == nnkIdent:
+    if "true".eqIdent(n):
+      true
+    elif "false".eqIdent(n):
+      false
+    else:
+      error("Expected true or false", n)
+  else:
+    n.boolVal
+
 type
   NimParamDef = object
     name: NimNode
@@ -83,6 +95,7 @@ type
     name: NimNode
     typ: NimNode
     def: PropertyDef
+    notifyValue: bool
 
   NimTypeDef = object
     n: NimNode
@@ -210,15 +223,18 @@ proc readType(n: NimNode): NimTypeDef =
           var
             write = true
             notify = true
+            notifyValue = false
 
           if qprop[0].kind == nnkCall:
             for n in qprop[0][1 ..^ 1]:
               case n.kind
               of nnkExprEqExpr:
                 if "write".eqIdent(n[0]):
-                  write = n[1].boolVal
+                  write = n[1].boolArg
                 elif "notify".eqIdent(n[0]):
-                  notify = n[1].boolVal
+                  notify = n[1].boolArg
+                elif "notifyValue".eqIdent(n[0]):
+                  notifyValue = n[1].boolArg
                 else:
                   raisEAssert "Unkown property"
               else:
@@ -244,6 +260,7 @@ proc readType(n: NimNode): NimTypeDef =
                   else:
                     "",
               ),
+              notifyValue: notifyValue,
             )
           )
 
@@ -341,20 +358,44 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
             if (let signalIndex = findSignal(prop.def.notifySignal); signalIndex >= 0):
               signalIndex
             else:
-              let
-                name = ident(prop.def.notifySignal)
-                n = quote:
+              let name = ident(prop.def.notifySignal)
+              if prop.notifyValue:
+                # The new value travels with the signal, as in moc / repc:
+                # `nameChanged(QString name)`
+                let
+                  valueName = ident(propName.strVal)
+                  n = quote:
+                    proc `name`*(o: `typName`, `valueName`: `propType`)
+                p.signals.add NimMethodDef(
+                  n: n,
+                  name: name,
+                  returnType: voidTyp,
+                  params: @[NimParamDef(name: valueName, typ: propType)],
+                )
+                pre.add n
+              else:
+                let n = quote:
                   proc `name`*(o: `typName`)
 
-              p.signals.add NimMethodDef(
-                n: n, name: name, returnType: voidTyp, params: @[]
-              )
-              pre.add n
+                p.signals.add NimMethodDef(
+                  n: n, name: name, returnType: voidTyp, params: @[]
+                )
+                pre.add n
               p.signals.high()
 
           p.signals[signalIndex].name
         else:
           nil
+      # A notify signal that takes an argument (generated, or declared in the
+      # block) is emitted with the new value
+      (o, v) = (ident"o", ident"v")
+      notifyCall =
+        if signalNameLit == nil:
+          nil
+        elif p.signals[findSignal(prop.def.notifySignal)].params.len > 0:
+          newCall(signalNameLit, o, v)
+        else:
+          newCall(signalNameLit, o)
 
     if prop.def.writeSlot.len > 0 and findSlot(prop.def.writeSlot) < 0:
       p.slots.add NimMethodDef(
@@ -365,12 +406,12 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
 
       let writeSlotLit = p.slots[^1].name
 
-      if signalNameLit != nil:
+      if notifyCall != nil:
         pre.add quote do:
-          proc `writeSlotLit`*(o: `typName`, v: `propType`) =
-            if o.`propName` != v:
-              o.`propName` = v
-              o.`signalNameLit`()
+          proc `writeSlotLit`*(`o`: `typName`, `v`: `propType`) =
+            if `o`.`propName` != `v`:
+              `o`.`propName` = `v`
+              `notifyCall`
 
       else:
         pre.add quote do:

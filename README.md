@@ -60,6 +60,29 @@ engine.loadData(qml.toOpenArrayByte(0, qml.high))
 discard QApplication.exec()
 ```
 
+### Notify signals with the new value
+
+By default a property's notify signal takes no arguments (`nameChanged()`). With
+`notifyValue = true` it carries the new value, as moc and repc declare it
+(`healthChanged(QString health)`), and the generated setter passes it:
+
+```nim
+qobject:
+  type Status = ref object of VirtualQObject
+    health {.qproperty(notifyValue = true).}: string
+
+let s = Status()
+QObject.create(s)
+s.onHealthChanged(
+  proc(health: string) {.gcsafe, raises: [].} =
+    echo "health: ", health
+)
+s.setHealth("ok") # health: ok
+```
+
+QML bindings work as before, and a QML handler can name the argument:
+`function onHealthChanged(health) { … }`.
+
 See [`nim-seaqt`](https://github.com/seaqt/nim-seaqt) for more information.
 
 ## Related projects

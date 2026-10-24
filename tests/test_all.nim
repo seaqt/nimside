@@ -1,2 +1,2 @@
 import
-  ./test_metaobjectgen
+  ./test_metaobjectgen, ./test_notifyvalue
