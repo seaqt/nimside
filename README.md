@@ -60,6 +60,28 @@ engine.loadData(qml.toOpenArrayByte(0, qml.high))
 discard QApplication.exec()
 ```
 
+### Properties
+
+A `{.qproperty.}` field gets a Nim getter, a Nim setter that emits the notify
+signal when the value changes, and a `<name>Changed` notify signal:
+
+```nim
+qobject:
+  type Counter = ref object of VirtualQObject
+    value {.qproperty.}: int # value(), setValue(v), valueChanged()
+    label {.qproperty(write = false).}: string # label(), labelChanged()
+    fixed {.qproperty(write = false, notify = false).}: string # constant
+
+  proc reset(c: Counter) {.slot.} =
+    c.setValue(0)
+```
+
+As with `moc`, the accessors back the property but are not meta-methods: the
+metaobject of `Counter` lists `valueChanged()`, `labelChanged()` and `reset()`
+only. QML reads and writes `counter.value`; to also make the setter callable as
+a method (`counter.setValue(1)`, `QMetaObject::invokeMethod`), declare it
+yourself as a `{.slot.}` - the property then uses your slot.
+
 See [`nim-seaqt`](https://github.com/seaqt/nim-seaqt) for more information.
 
 ## Related projects

@@ -331,6 +331,7 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
     voidTyp = ident"void"
     staticMetaObject = ident("staticMetaObject")
 
+  var readers, writers: seq[NimMethodDef]
   for i, prop in props:
     let
       propName = prop.name
@@ -356,14 +357,23 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
         else:
           nil
 
-    if prop.def.writeSlot.len > 0 and findSlot(prop.def.writeSlot) < 0:
-      p.slots.add NimMethodDef(
+    # Accessors are plain Nim procs that the metacall dispatches to directly -
+    # like moc, they only become meta-methods if the user declares them as slots
+    let
+      readSlotIndex = findSlot(prop.def.readSlot)
+      writeSlotIndex = findSlot(prop.def.writeSlot)
+    var reader, writer: NimMethodDef
+
+    if writeSlotIndex >= 0:
+      writer = p.slots[writeSlotIndex]
+    elif prop.def.writeSlot.len > 0:
+      writer = NimMethodDef(
         name: ident prop.def.writeSlot,
         returnType: voidTyp,
         params: @[NimParamDef(name: ident "newValue", typ: prop.typ)],
       )
 
-      let writeSlotLit = p.slots[^1].name
+      let writeSlotLit = writer.name
 
       if signalNameLit != nil:
         pre.add quote do:
@@ -377,14 +387,18 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
           proc `writeSlotLit`*(o: `typName`, v: `propType`) =
             o.`propName` = v
 
-    if prop.def.readSlot.len > 0 and findSlot(prop.def.readSlot) < 0:
-      p.slots.add NimMethodDef(
-        name: ident(prop.def.readSlot), returnType: propType, params: @[]
-      )
-      let slotName = p.slots[^1].name
+    if readSlotIndex >= 0:
+      reader = p.slots[readSlotIndex]
+    elif prop.def.readSlot.len > 0:
+      reader =
+        NimMethodDef(name: ident(prop.def.readSlot), returnType: propType, params: @[])
+      let slotName = reader.name
       pre.add quote do:
         proc `slotName`*(o: `typName`): lent `propType` =
           o.`propName`
+
+    readers.add reader
+    writers.add writer
 
   for signalIndex, signal in p.signals:
     let signalIndexLit = newLit(signalIndex)
@@ -561,7 +575,7 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
 
   for i, prop in props:
     if prop.def.readSlot.len > 0:
-      let slot = p.slots[findSlot(prop.def.readSlot)]
+      let slot = readers[i]
       if canConstruct(slot):
         readPropCase.add nnkOfBranch.newTree(
           newLit(i), genMethodCall(slot, slot.name, self, argv, newLit(1))
@@ -571,7 +585,7 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
           slot.name.strVal, slot.name
 
     if prop.def.writeSlot.len > 0:
-      let slot = p.slots[findSlot(prop.def.writeSlot)]
+      let slot = writers[i]
       if canConstruct(slot):
         writePropCase.add nnkOfBranch.newTree(
           newLit(i), genMethodCall(slot, slot.name, self, argv, newLit(0))

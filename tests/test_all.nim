@@ -1,2 +1,1 @@
-import
-  ./test_metaobjectgen
+import ./test_metaobjectgen, ./test_qobject
