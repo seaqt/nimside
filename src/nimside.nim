@@ -94,6 +94,22 @@ type
 proc isVoid(v: NimNode): bool =
   v.kind == nnkEmpty or "void".eqIdent(v)
 
+proc copyLineInfoRec(n, info: NimNode) =
+  n.copyLineInfo(info)
+  for c in n:
+    c.copyLineInfoRec(info)
+
+proc signatureText(m: NimMethodDef): string =
+  let params = m.n.params
+  result = $m.name & "("
+  for i in 1 ..< params.len:
+    if i > 1:
+      result.add ", "
+    result.add params[i].repr
+  result.add ")"
+  if not m.returnType.isVoid():
+    result.add ": " & m.returnType.repr
+
 proc toParamDef(v: NimParamDef): NimNode =
   let
     name = newLit($v.name)
@@ -302,7 +318,7 @@ proc readProc(n: NimNode, types: var openArray[NimTypeDef]) =
 proc canConstruct(m: NimMethodDef): bool =
   true # not anyIt(m.params, toMetaTypeName(it.typ) == QMetaTypeTypeEnum.QObjectStar)
 
-proc processType(p: var NimTypeDef): (NimNode, NimNode) =
+proc processType(p: var NimTypeDef, iface: bool): (NimNode, NimNode) =
   let
     n = p.n
     props = p.props
@@ -591,9 +607,10 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
     methodCountLit = newLit(p.signals.len + p.slots.len)
     propCountLit = newLit(props.len)
     metacall = ident("metacall")
-  post.add quote do:
-    method `metacall`(`self`: `typName`, c: cint, id: cint, a: pointer): cint =
-      var `id` = gen_qobject.QObjectmetacall(`self`[], c, id, a)
+    c = ident("c")
+    a = ident("a")
+    metacallBody = quote:
+      var `id` = gen_qobject.QObjectmetacall(`self`[], `c`, `id`, `a`)
       if `id` < 0:
         return `id`
 
@@ -614,8 +631,8 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
             QMetaObjectCallEnum.RegisterPropertyMetaType,
           }
 
-      let `argv` = cast[ptr UncheckedArray[pointer]](a)
-      case c
+      let `argv` = cast[ptr UncheckedArray[pointer]](`a`)
+      case `c`
       of gen_qobjectdefs.QMetaObjectCallEnum.InvokeMetaMethod:
         `invokeCase`
         `id` - cint(`methodCountLit`)
@@ -631,6 +648,65 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
         `id` - cint(`propCountLit`)
       else:
         `id`
+
+  if iface:
+    # `metacall` is written by `qimplement`, in the module that implements the
+    # slots: `mixin` resolves them there, after checking that each one exists.
+    let
+      qimplementation = ident("qimplementation")
+      qcheck = ident("qcheckImplementation")
+      implTyp = ident("I")
+      userSlots = p.slots.filterIt(it.n != nil)
+      slotMixin =
+        if userSlots.len > 0:
+          nnkMixinStmt.newTree(userSlots.mapIt(ident(it.name.strVal)))
+        else:
+          nnkStmtList.newTree()
+      checks = nnkStmtList.newTree(slotMixin.copyNimTree())
+    for s in userSlots:
+      let
+        call = nnkCall.newTree(
+          ident(s.name.strVal),
+          quote do:
+            default(`implTyp`),
+        )
+        sig = className & ": slot " & s.signatureText()
+        missing = newLit(sig & " is not implemented")
+        mismatch = newLit(sig & " is implemented with another return type")
+        retTyp =
+          if s.returnType.isVoid():
+            ident("void")
+          else:
+            s.returnType
+      for param in s.params:
+        let typ = param.typ
+        call.add quote do:
+          default(`typ`)
+      let check = quote:
+        when not compiles(`call`):
+          {.error: `missing`.}
+        elif typeof(`call`) isnot `retTyp`:
+          {.error: `mismatch`.}
+      # Report at the slot's declaration in the interface, and from there at the
+      # `qimplement` that lacks it
+      check.copyLineInfoRec(s.n)
+      checks.add check
+    post.add quote do:
+      template `qcheck`*(_: type `typName`, `implTyp`: typedesc) =
+        `checks`
+
+      template `qimplementation`*(_: type `typName`, `implTyp`: typedesc) =
+        `qcheck`(`typName`, `implTyp`)
+        `slotMixin`
+        method `metacall`(
+            `self`: `implTyp`, `c`: cint, `id`: cint, `a`: pointer
+        ): cint =
+          `metacallBody`
+
+  else:
+    post.add quote do:
+      method `metacall`(`self`: `typName`, `c`: cint, `id`: cint, `a`: pointer): cint =
+        `metacallBody`
 
   post.add quote do:
     proc setup*(o: `typName`) =
@@ -676,7 +752,7 @@ proc processType(p: var NimTypeDef): (NimNode, NimNode) =
 
   (pre, post)
 
-macro qobject*(body: untyped): untyped =
+proc genQObject(body: NimNode, iface: bool): NimNode =
   result = nnkStmtList.newTree()
 
   # Process all types first so as to avoid code ordering issues
@@ -697,6 +773,11 @@ macro qobject*(body: untyped): untyped =
     case n.kind
     of nnkProcDef:
       readProc(n, typeDefs)
+      if iface and n.pragma.hasPragma("slot") and n.body.kind != nnkEmpty:
+        error(
+          "A slot in a qinterface has no body: implement it in another module, then call qimplement",
+          n,
+        )
     else:
       discard
 
@@ -704,7 +785,7 @@ macro qobject*(body: untyped): untyped =
 
   # Finally, process all types and write out their helpers / metadata
   for typDef in typeDefs.mitems():
-    let (a, b) = processType(typDef)
+    let (a, b) = processType(typDef, iface)
     result.add a
     post.add b
 
@@ -712,6 +793,10 @@ macro qobject*(body: untyped): untyped =
     case n.kind
     of nnkTypeSection:
       discard
+    of nnkProcDef:
+      # An interface's slots are implemented elsewhere: no forward declaration
+      if not (iface and n.pragma.hasPragma("slot")):
+        result.add n
     else:
       # Other stuff comes after auto-generated helpers
       result.add n
@@ -719,6 +804,31 @@ macro qobject*(body: untyped): untyped =
   result.add post
 
   #debugEcho repr(result)
+
+macro qobject*(body: untyped): untyped =
+  genQObject(body, iface = false)
+
+macro qinterface*(body: untyped): untyped =
+  ## Declare QObject types like `qobject`, but with slots that have no body: the
+  ## metaobject, properties and signals are generated here, and another module
+  ## implements the slots as plain procs, then calls `qimplement`.
+  genQObject(body, iface = true)
+
+template qimplement*(T, I: typedesc) =
+  ## Implement the `qinterface` type `T` with the procs in scope, for objects of
+  ## type `I` (`T` itself, or a type derived from it). A slot without a matching
+  ## proc is a compile error naming the slot.
+  when I isnot T:
+    {.
+      error:
+        "qimplement: the implementing type must be the interface type or derive from it"
+    .}
+  qimplementation(T, I)
+  # The module matters for its `metacall` alone
+  {.used.}
+
+template qimplement*(T: typedesc) =
+  qimplement(T, T)
 
 when isMainModule:
   import seaqt/[qstringlistmodel, qobject as qo, qmetaobject, qmetamethod]

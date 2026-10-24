@@ -14,3 +14,4 @@ task test, "run tests":
   exec "nim r --hints:off tests/test_all"
   exec "make -C examples/plugins"
   exec "nim c examples/minimal/hello"
+  exec "nim c examples/interface/main"
