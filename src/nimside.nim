@@ -67,6 +67,18 @@ proc findPragma(n: NimNode, name: string): NimNode =
 proc hasPragma(n: NimNode, name: string): bool =
   findPragma(n, name) != nil
 
+proc boolArg(n: NimNode): bool =
+  # An untyped `true` is an ident, which `boolVal` reads as false
+  if n.kind == nnkIdent:
+    if "true".eqIdent(n):
+      true
+    elif "false".eqIdent(n):
+      false
+    else:
+      error("Expected true or false, got " & n.repr, n)
+  else:
+    n.boolVal
+
 type
   NimParamDef = object
     name: NimNode
@@ -216,13 +228,17 @@ proc readType(n: NimNode): NimTypeDef =
               case n.kind
               of nnkExprEqExpr:
                 if "write".eqIdent(n[0]):
-                  write = n[1].boolVal
+                  write = n[1].boolArg
                 elif "notify".eqIdent(n[0]):
-                  notify = n[1].boolVal
+                  notify = n[1].boolArg
                 else:
-                  raisEAssert "Unkown property"
+                  error(
+                    "Unknown qproperty argument `" & n[0].repr &
+                      "`, expected `write` or `notify`",
+                    n[0],
+                  )
               else:
-                raiseAssert "unexpected param " & $n.kind
+                error("Expected `name = value` in qproperty, got " & n.repr, n)
 
           props.add(
             NimPropDef(
